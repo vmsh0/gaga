@@ -1,0 +1,13 @@
+build/
+cmake-build-release-esp32/
+.cache/
+.ccls-cache/
+.ipynb_checkpoints/
+.vim/
+.idea/
+
+.ccls
+.lvimrc
+*.mp3
+*.wav
+*.ipynb

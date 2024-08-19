@@ -1,0 +1,69 @@
+ESP docs suck a bit, but here's the gist of how to use the I2S module:
+
+i2s_new_channel:
+  - defined in i2s_common.c
+  - accepts i2s_chan_config_t
+    - contains port number, descriptors number, frames per descriptor
+    - macro I2S_CHANNEL_DEFAULT_CONFIG can set it up with sane defaults
+  - returns simplex channel handle (i2s_chan_handle_t)
+  - it does:
+    - simple sanity checks on inputs
+    - acquires a hardware controller and one suitable channel (i.e. one data line)
+    - calls i2s_register_channel, private API in same file
+      - sets up the i2s_chan_handle_t that will be returned
+      - but not completely, some stuff is the also done in i2s_new_channel directly
+      - important: allocates DMA-related messaging primitives, but not the DMA buffers themselves
+
+then you pick the flavour of i2s that you want to do. let's pick std for an example. so you have to
+initialize the channel in std mode:
+
+i2s_channel_init_std_mode:
+  - defined in i2s_std.c/h
+  - accepts the previously obtained channel handle (i2s_chan_handle_t)
+  - and additionally, i2s_std_config_t
+    - contains sample rate, bit resolution, audio channels (mono or stereo), pin mapping
+    - macros I2S_STD_CLK_DEFAULT_CONFIG, I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG can help set it up
+  - returns nothing, acts on the channel handle
+  - it does:
+    - sets up some hardware-specific stuff (e.g. clock), DMA interrupts
+    - allocates DMA buffers by calling i2s_std_set_slot (right? lol)
+      - will compute number of frames per buffer by calling i2s_get_buf_size in i2s_common.c
+        - takes number of frames and frame size into account, but if their product exceeds
+          I2S_DMA_BUFFER_MAX_SIZE (4092 bytes) it will decrease the number of frames
+      - will allocate those buffers ("number of descriptors") by calling i2s_alloc_dma_desc in
+        i2s_common.c
+        - which overwrites handle->dma.desc_num and handle->dma.buf_size for good measure, even
+          though they were just computed/copied before the call
+
+i2s_channel_enable:
+  - defined in i2s_common.c/h
+  - accepts the channel handle
+  - basically does some checks and kickstarts the producer/consumer communication primitives
+
+i2s_channel_write:
+  - defined in i2s_common.c/h
+  - accepts channel handle
+  - basically fills DMA buffers in the order dictated by the handle->msg_queue queue, which gets a
+    sequence of memory pointers in the order in which they are read by the DMA controller.
+    - so basically:
+      - the buffers are allocated (and optionally pre-filled)
+      - the DMA controller will start pushing out the first buffer
+      - when that's done, it will interrupt the CPU, and the ISR will publish the address of this
+        buffer in the msg_queue queue -- todo: find code
+      - the public write function the dequeues this very buffer address, and writes something new to
+        it from the user
+      - rinse and repeat fast enough that the DMA controller basically doesn't have enough time to
+        circle back to the first buffer before something was written to it
+        - twist: in i2s_chan_config_t you can use the flag auto_clear to make it so the buffer is
+          cleared after a DMA interrupt, so if you're not fast enough you're gonna get mute instead
+          of glitches
+
+so the bottom line is that you have the following knobs:
+- buffer size: maximum 4096, must be multiple of frame size, which is one sample for each channel
+  (e.g. 16 bit stereo has 32 bit/4 byte frames)
+  - note: 8 bit and 24 bit use respectively 2 bytes and 4 byte, where the LS 8 bits are ignored
+- number of buffers: doesn't have a hard limit, default is 6, minimum is 2 (double buffering)
+- your minimum latency is double buffering + 1 frame buffers, for a 1 frame latency, but obviously
+  you're not gonna keep up
+- latency is computed as (...todo)
+
